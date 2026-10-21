@@ -24,6 +24,7 @@ class HelloTriangleApplication
 		cleanup();
 	}
 
+
   private:
 	GLFWwindow *window = nullptr;
 
