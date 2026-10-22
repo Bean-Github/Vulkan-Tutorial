@@ -1,14 +1,17 @@
+#define NOMINMAX
+
 #include <algorithm>
 #include <assert.h>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <stdexcept>
-#include <vector>
 #include <string>
-#include <cstdint>
+#include <vector>
 
 #if defined(__INTELLISENSE__) || !defined(USE_CPP20_MODULES)
 #	include <vulkan/vulkan_raii.hpp>
@@ -21,7 +24,6 @@ import vulkan_hpp;
 #include <GLFW/glfw3.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
-
 
 constexpr uint32_t WIDTH  = 800;
 constexpr uint32_t HEIGHT = 600;
@@ -52,12 +54,14 @@ class HelloTriangleApplication
 	vk::raii::Instance               instance       = nullptr;
 	vk::raii::DebugUtilsMessengerEXT debugMessenger = nullptr;
 
-	vk::raii::SurfaceKHR surface       = nullptr;
+	vk::raii::SurfaceKHR surface = nullptr;
 
-	vk::raii::PhysicalDevice physicalDevice = nullptr;		  // Physical device (GPU) that will be used to run the application
-	vk::raii::Device         device         = nullptr;        // Logical device
+	vk::raii::PhysicalDevice physicalDevice =
+	    nullptr;                              // Physical device (GPU) that will be used to run the application
+	vk::raii::Device device = nullptr;        // Logical device
 
-	vk::raii::Queue graphicsQueue = nullptr;
+	vk::raii::Queue graphicsQueue =
+	    nullptr;        // this is created with the logical device and is used to submit commands to the GPU
 
 	vk::raii::SwapchainKHR           swapChain = nullptr;
 	std::vector<vk::Image>           swapChainImages;
@@ -65,7 +69,8 @@ class HelloTriangleApplication
 	vk::Extent2D                     swapChainExtent;
 	std::vector<vk::raii::ImageView> swapChainImageViews;
 
-	vk::PhysicalDeviceFeatures deviceFeatures;
+	vk::raii::PipelineLayout pipelineLayout   = nullptr;
+	vk::raii::Pipeline       graphicsPipeline = nullptr;
 
 	std::vector<const char *> requiredDeviceExtension = {vk::KHRSwapchainExtensionName};
 
@@ -107,6 +112,10 @@ class HelloTriangleApplication
 		glfwTerminate();
 	}
 
+	// a vulkan instance is the connection between our application and the Vulkan library. It is created with a set of
+	// application information, validation layers, and extensions that we want to use. The instance is responsible for
+	// managing the resources and objects that we create in our application, and it provides access to the physical
+	// devices (GPUs) that are available on the system.
 	void createInstance()
 	{
 		constexpr vk::ApplicationInfo appInfo{
@@ -174,7 +183,7 @@ class HelloTriangleApplication
 		    .messageSeverity = severityFlags, .messageType = messageTypeFlags, .pfnUserCallback = &debugCallback};
 		debugMessenger = instance.createDebugUtilsMessengerEXT(debugUtilsMessengerCreateInfoEXT);
 	}
-	
+
 	void createSurface()
 	{
 		VkSurfaceKHR _surface;
@@ -196,7 +205,7 @@ class HelloTriangleApplication
 		bool     supportsGraphicsAndPresent =
 		    std::ranges::any_of(queueFamilies, [&physicalDevice, &surface = this->surface, &qfpIndex](auto const &qfp) {
 			    bool const suitable = (qfp.queueFlags & vk::QueueFlagBits::eGraphics) &&
-			                          physicalDevice.getSurfaceSupportKHR(qfpIndex, *surface);
+				                      physicalDevice.getSurfaceSupportKHR(qfpIndex, *surface);
 			    qfpIndex++;
 			    return suitable;
 		    });
@@ -227,12 +236,13 @@ class HelloTriangleApplication
 		       supportsRequiredFeatures;
 	}
 
-
+	// picks the correct physical device (GPU) to use for the application based on the criteria defined in
+	// isDeviceSuitable()
 	void pickPhysicalDevice()
 	{
 		std::vector<vk::raii::PhysicalDevice> physicalDevices = instance.enumeratePhysicalDevices();
 		auto const                            devIter         = std::ranges::find_if(
-            physicalDevices, [&](auto const &physicalDevice) { return isDeviceSuitable(physicalDevice); });
+		    physicalDevices, [&](auto const &physicalDevice) { return isDeviceSuitable(physicalDevice); });
 		if (devIter == physicalDevices.end())
 		{
 			throw std::runtime_error("failed to find a suitable GPU!");
@@ -240,7 +250,11 @@ class HelloTriangleApplication
 		physicalDevice = *devIter;
 	}
 
-	
+	// a logical device is an abstraction of the physical device (GPU) that allows us to interact with it and submit
+	// commands. It is created with a specific set of features and extensions that we want to use, and it provides
+	// access to the queues that we will use to submit commands to the GPU. In this function, we create a logical device
+	// with a queue that supports both graphics and presentation, and we enable the required features and extensions for
+	// our application.
 	void createLogicalDevice()
 	{
 		std::vector<vk::QueueFamilyProperties> queueFamilyProperties = physicalDevice.getQueueFamilyProperties();
@@ -271,7 +285,7 @@ class HelloTriangleApplication
 		        {.shaderDrawParameters = true},        // Enable shader draw parameters from Vulkan 1.1
 		        {.dynamicRendering = true},            // Enable dynamic rendering from Vulkan 1.3
 		        {.extendedDynamicState = true}         // Enable extended dynamic state from the extension
-		    };
+		};
 
 		float                     queuePriority = 0.5f;
 		vk::DeviceQueueCreateInfo deviceQueueCreateInfo{
@@ -284,13 +298,14 @@ class HelloTriangleApplication
 		    .enabledExtensionCount   = static_cast<uint32_t>(requiredDeviceExtension.size()),
 		    .ppEnabledExtensionNames = requiredDeviceExtension.data()};
 
-		device = vk::raii::Device(physicalDevice, deviceCreateInfo);
+		device        = vk::raii::Device(physicalDevice, deviceCreateInfo);
 		graphicsQueue = vk::raii::Queue(device, queueIndex, 0);
-
-
 	}
 
-
+	// a swap chain is a series of images that are presented to the screen in a round-robin fashion, allowing for smooth
+	// rendering and presentation of frames. The swap chain is created with a specific surface format, present mode, and
+	// extent (size) that matches the window's dimensions. The swap chain images are then used as color attachments in
+	// the render pass, allowing the application to render to them before presenting them to the screen.
 	void createSwapChain()
 	{
 		vk::SurfaceCapabilitiesKHR surfaceCapabilities = physicalDevice.getSurfaceCapabilitiesKHR(*surface);
@@ -300,10 +315,8 @@ class HelloTriangleApplication
 		std::vector<vk::SurfaceFormatKHR> availableFormats = physicalDevice.getSurfaceFormatsKHR(*surface);
 		swapChainSurfaceFormat                             = chooseSwapSurfaceFormat(availableFormats);
 
-
 		std::vector<vk::PresentModeKHR> availablePresentModes = physicalDevice.getSurfacePresentModesKHR(*surface);
-		vk::PresentModeKHR presentMode = chooseSwapPresentMode(availablePresentModes);
-
+		vk::PresentModeKHR              presentMode           = chooseSwapPresentMode(availablePresentModes);
 
 		vk::SwapchainCreateInfoKHR swapChainCreateInfo{
 		    .surface          = *surface,
@@ -316,12 +329,11 @@ class HelloTriangleApplication
 		    .imageSharingMode = vk::SharingMode::eExclusive,
 		    .preTransform     = surfaceCapabilities.currentTransform,
 		    .compositeAlpha   = vk::CompositeAlphaFlagBitsKHR::eOpaque,
-		    .presentMode = presentMode,
-		    .clipped          = true
-		};
+		    .presentMode      = presentMode,
+		    .clipped          = true};
 
 		swapChain       = vk::raii::SwapchainKHR(device, swapChainCreateInfo);
-	    swapChainImages = swapChain.getImages();
+		swapChainImages = swapChain.getImages();
 	}
 
 	uint32_t chooseSwapMinImageCount(vk::SurfaceCapabilitiesKHR const &surfaceCapabilities)
@@ -344,8 +356,9 @@ class HelloTriangleApplication
 
 	vk::PresentModeKHR chooseSwapPresentMode(std::vector<vk::PresentModeKHR> const &availablePresentModes)
 	{
-		assert(std::ranges::any_of(
-		    availablePresentModes, [](auto presentMode) { return presentMode == vk::PresentModeKHR::eFifo; }));
+		assert(std::ranges::any_of(availablePresentModes, [](auto presentMode) {
+			return presentMode == vk::PresentModeKHR::eFifo;
+		}));
 		return std::ranges::any_of(
 		           availablePresentModes,
 		           [](const vk::PresentModeKHR value) { return vk::PresentModeKHR::eMailbox == value; }) ?
@@ -370,7 +383,9 @@ class HelloTriangleApplication
 		    std::clamp<uint32_t>(height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height)};
 	}
 
-
+	// this function creates an image view for each image in the swap chain, which allows us to use the images as color
+	// attachments in the render pass (an image view describes how to access an image and which part of the image to
+	// access) here, we just create a simple image view for each image
 	void createImageViews()
 	{
 		assert(swapChainImageViews.empty());
@@ -393,14 +408,129 @@ class HelloTriangleApplication
 		}
 	}
 
-
 	void createGraphicsPipeline()
 	{
+		auto shaderCode = readFile("shaders/slang.spv");
 
+		vk::raii::ShaderModule shaderModule = createShaderModule(shaderCode);
 
-	
+		vk::PipelineShaderStageCreateInfo vertShaderStageInfo{
+		    .stage = vk::ShaderStageFlagBits::eVertex, .module = shaderModule, .pName = "vertMain"};
+
+		vk::PipelineShaderStageCreateInfo fragShaderStageInfo{
+		    .stage = vk::ShaderStageFlagBits::eFragment, .module = shaderModule, .pName = "fragMain"};
+
+		vk::PipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
+
+		// create fixed functions below, define / configure Vulkan pipeline stages that are not programmable (e.g.
+		// vertex input info, input assembly, viewport, rasterizer, multisampling, color blending, etc.) we define
+		// dynamic states for viewport and scissor, which can be specified at drawing time
+		vk::PipelineVertexInputStateCreateInfo vertexInputInfo;
+
+		vk::PipelineInputAssemblyStateCreateInfo inputAssembly{.topology = vk::PrimitiveTopology::eTriangleList};
+
+		vk::PipelineViewportStateCreateInfo viewportState{
+		    .viewportCount = 1, .scissorCount = 1};        // we will set the viewport and scissor dynamically, here we
+			                                               // only need to define the number of viewports and scissors
+
+		vk::PipelineRasterizationStateCreateInfo rasterizer{
+		    .depthClampEnable        = vk::False,
+		    .rasterizerDiscardEnable = vk::False,
+		    .polygonMode             = vk::PolygonMode::eFill,
+		    .cullMode                = vk::CullModeFlagBits::eBack,
+		    .frontFace               = vk::FrontFace::eClockwise,
+		    .depthBiasEnable         = vk::False,
+		    .lineWidth               = 1.0f};
+
+		vk::PipelineMultisampleStateCreateInfo multisampling{
+		    .rasterizationSamples = vk::SampleCountFlagBits::e1, .sampleShadingEnable = vk::False};
+
+		vk::PipelineColorBlendAttachmentState colorBlendAttachment{
+		    .blendEnable    = vk::False,
+		    .colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
+			                  vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA};
+
+		vk::PipelineColorBlendStateCreateInfo colorBlending{
+		    .logicOpEnable   = vk::False,
+		    .logicOp         = vk::LogicOp::eCopy,
+		    .attachmentCount = 1,
+		    .pAttachments    = &colorBlendAttachment};
+
+		std::vector<vk::DynamicState> dynamicStates = {vk::DynamicState::eViewport, vk::DynamicState::eScissor};
+
+		vk::PipelineDynamicStateCreateInfo dynamicState{
+		    .dynamicStateCount = static_cast<uint32_t>(dynamicStates.size()), .pDynamicStates = dynamicStates.data()};
+
+		vk::PipelineLayoutCreateInfo pipelineLayoutInfo{
+		    .setLayoutCount         = 0,
+		    .pushConstantRangeCount = 0};        // specifies how vulkan should handle descriptor sets and push
+			                                     // constants (basically how they receive external data like uniforms)
+		// setLayoutCount = 0 means we don't use any descriptor sets, and pushConstantRangeCount = 0 means we don't use
+		// any push constants
+		pipelineLayout = vk::raii::PipelineLayout(device, pipelineLayoutInfo);
+
+		// before, the system worked by having render passes and frame buffers
+		// a render pass is a collection of attachments, subpasses, and dependencies that define how the rendering will
+		// be performed. It specifies the number and types of attachments (e.g., color, depth, stencil), how they will
+		// be used in each subpass, and how the subpasses depend on each other. a framebuffer is a collection of image
+		// views that the render pass will render to. there is 1 frame buffer per image view in the swap chain you would
+		// choose a frame buffer to render to at draw time, and the render pass would define how to use that frame
+		// buffer
+
+		// (before, you would acquire image index, choose frame buffer, begin render pass on the frame buffer,
+		// draw, end render pass, present image index)
+
+		// Dynamic rendering simplifies the rendering process by eliminating the need for render pass and framebuffer objects. 
+		// Instead, we can specify the color, depth, and stencil attachments directly when we begin rendering.
+
+		vk::StructureChain<vk::GraphicsPipelineCreateInfo, vk::PipelineRenderingCreateInfo> pipelineCreateInfoChain = {
+		    {.stageCount          = 2,
+			 .pStages             = shaderStages,
+			 .pVertexInputState   = &vertexInputInfo,
+			 .pInputAssemblyState = &inputAssembly,
+			 .pViewportState      = &viewportState,
+			 .pRasterizationState = &rasterizer,
+			 .pMultisampleState   = &multisampling,
+			 .pColorBlendState    = &colorBlending,
+			 .pDynamicState       = &dynamicState,
+			 .layout              = pipelineLayout,
+			 .renderPass          = nullptr},
+				{.colorAttachmentCount = 1,
+				.pColorAttachmentFormats =
+			     &swapChainSurfaceFormat.format}};        // creates a description of the color attachments that the
+			                                              // graphics pipeline expects when using dynamic
+			                                              // rendering
+
+		graphicsPipeline =
+		    vk::raii::Pipeline(device, nullptr, pipelineCreateInfoChain.get<vk::GraphicsPipelineCreateInfo>());
 	}
 
+	static std::vector<char> readFile(const std::string &filename)
+	{
+		std::ifstream file(filename, std::ios::ate | std::ios::binary);
+
+		if (!file.is_open())
+		{
+			throw std::runtime_error("failed to open file!");
+		}
+
+		std::vector<char> buffer(file.tellg());
+		file.seekg(0, std::ios::beg);
+		file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+		file.close();
+
+		return buffer;
+	}
+
+	[[nodiscard]] vk::raii::ShaderModule createShaderModule(const std::vector<char> &code) const
+	{
+		vk::ShaderModuleCreateInfo createInfo{
+		    .codeSize = code.size() * sizeof(char), .pCode = reinterpret_cast<const uint32_t *>(code.data())};
+
+		vk::raii::ShaderModule shaderModule{device, createInfo};
+
+		return shaderModule;
+	}
 
 	std::vector<const char *> getRequiredInstanceExtensions()
 	{
@@ -431,8 +561,6 @@ class HelloTriangleApplication
 
 		return vk::False;
 	}
-
-
 };
 
 int main()

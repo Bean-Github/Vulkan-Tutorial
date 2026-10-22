@@ -96,22 +96,44 @@ if(WIN32)
   endif()
 endif()
 
-# Slang shader
-set (SHADER_TARGET ${TEMPLATE_NAME}Shader)
-set (SHADERS_DIR ${TEMPLATE_DIR}/shaders)
-set (SHADER_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/shader.slang")
-set (ENTRY_POINTS -entry vertMain -entry fragMain)
-add_custom_command(OUTPUT ${SHADERS_DIR} COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADERS_DIR})
+# Slang shader compilation
+set(SHADER_TARGET "${TEMPLATE_NAME}shader")
+set(SHADERS_DIR "${TEMPLATE_DIR}/shaders")
+set(SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/shader.slang")
+set(SHADER_OUTPUT "${SHADERS_DIR}/slang.spv")
+
 add_custom_command(
-  OUTPUT  ${SHADERS_DIR}/slang.spv
-  COMMAND ${SLANGC_EXECUTABLE} ${SHADER_SOURCES} -target spirv -profile spirv_1_4 -emit-spirv-directly -fvk-use-entrypoint-name ${ENTRY_POINTS} -o ${TEMPLATE_DIR}/shaders/slang.spv
-  WORKING_DIRECTORY ${SHADERS_DIR}
-  DEPENDS ${SHADERS_DIR} ${SHADER_SOURCES}
-  COMMENT "Compiling Slang Shaders"
-  VERBATIM
+    OUTPUT "${SHADER_OUTPUT}"
+
+    COMMAND ${CMAKE_COMMAND}
+        -E make_directory
+        "${SHADERS_DIR}"
+
+    COMMAND "${SLANGC_EXECUTABLE}"
+        "${SHADER_SOURCE}"
+        -target spirv
+        -profile spirv_1_4
+        -emit-spirv-directly
+        -fvk-use-entrypoint-name
+        -entry vertMain
+        -entry fragMain
+        -o "${SHADER_OUTPUT}"
+
+    DEPENDS "${SHADER_SOURCE}"
+
+    COMMENT "Compiling Slang shader"
+    VERBATIM
 )
-add_custom_target(${SHADER_TARGET} DEPENDS ${SHADERS_DIR}/slang.spv)
-add_dependencies(${TEMPLATE_NAME} ${SHADER_TARGET})
+
+add_custom_target(
+    "${SHADER_TARGET}"
+    DEPENDS "${SHADER_OUTPUT}"
+)
+
+add_dependencies(
+    "${TEMPLATE_NAME}"
+    "${SHADER_TARGET}"
+)
 
 # Assets
 set (ASSET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../assets/")
