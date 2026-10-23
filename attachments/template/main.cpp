@@ -60,6 +60,8 @@ class HelloTriangleApplication
 	    nullptr;                              // Physical device (GPU) that will be used to run the application
 	vk::raii::Device device = nullptr;        // Logical device
 
+	uint32_t queueIndex = ~0;        // index of a queue family found in the physical device that supports both graphics and presentation                       
+
 	vk::raii::Queue graphicsQueue =
 	    nullptr;        // this is created with the logical device and is used to submit commands to the GPU
 
@@ -71,6 +73,13 @@ class HelloTriangleApplication
 
 	vk::raii::PipelineLayout pipelineLayout   = nullptr;
 	vk::raii::Pipeline       graphicsPipeline = nullptr;
+
+	vk::raii::CommandPool commandPool = nullptr;
+	vk::raii::CommandBuffer commandBuffer = nullptr;
+
+	vk::raii::Semaphore presentCompleteSemaphore = nullptr;
+	vk::raii::Semaphore renderFinishedSemaphore  = nullptr;
+	vk::raii::Fence     drawFence                = nullptr;
 
 	std::vector<const char *> requiredDeviceExtension = {vk::KHRSwapchainExtensionName};
 
@@ -93,8 +102,10 @@ class HelloTriangleApplication
 		createLogicalDevice();
 		createSwapChain();
 		createImageViews();
-
 		createGraphicsPipeline();
+		createCommandPool();
+		createCommandBuffer();
+		createSyncObjects();
 	}
 
 	void mainLoop()
@@ -102,7 +113,10 @@ class HelloTriangleApplication
 		while (!glfwWindowShouldClose(window))
 		{
 			glfwPollEvents();
+			drawFrame();
 		}
+
+		device.waitIdle();
 	}
 
 	void cleanup()
@@ -258,7 +272,6 @@ class HelloTriangleApplication
 	void createLogicalDevice()
 	{
 		std::vector<vk::QueueFamilyProperties> queueFamilyProperties = physicalDevice.getQueueFamilyProperties();
-		uint32_t                               queueIndex            = ~0;
 		for (uint32_t qfpIndex = 0; qfpIndex < queueFamilyProperties.size(); qfpIndex++)
 		{
 			if ((queueFamilyProperties[qfpIndex].queueFlags & vk::QueueFlagBits::eGraphics) &&
@@ -504,6 +517,209 @@ class HelloTriangleApplication
 		graphicsPipeline =
 		    vk::raii::Pipeline(device, nullptr, pipelineCreateInfoChain.get<vk::GraphicsPipelineCreateInfo>());
 	}
+
+	void createCommandPool()
+	{
+		vk::CommandPoolCreateInfo poolInfo{
+		    .flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer, .queueFamilyIndex = queueIndex};
+		commandPool = vk::raii::CommandPool(device, poolInfo);
+	}
+
+	void createCommandBuffer()
+	{
+		vk::CommandBufferAllocateInfo allocInfo{
+		    .commandPool = commandPool, .level = vk::CommandBufferLevel::ePrimary, .commandBufferCount = 1};
+
+		commandBuffer = std::move(vk::raii::CommandBuffers(device, allocInfo).front());
+
+	}
+
+	void recordCommandBuffer(uint32_t imageIndex)
+	{
+		commandBuffer.begin({});
+
+		// Before starting rendering, transition the swapchain image to vk::ImageLayout::eColorAttachmentOptimal
+		transition_image_layout(
+		    imageIndex,
+		    vk::ImageLayout::eUndefined,
+		    vk::ImageLayout::eColorAttachmentOptimal,
+		    {},        // srcAccessMask (no need to wait for previous operations)
+		    vk::AccessFlagBits2::eColorAttachmentWrite,                // dstAccessMask
+		    vk::PipelineStageFlagBits2::eColorAttachmentOutput,        // srcStage
+		    vk::PipelineStageFlagBits2::eColorAttachmentOutput         // dstStage
+		);
+
+		// set clear color to black with full opacity, and define the rendering attachment info for the swapchain image
+		// view (which image to render too and with what attachment / what to do with it, in this cae we clear it to black before and store it after), 
+		// and the rendering info for the render area, layer count, and color attachment count
+		vk::ClearValue              clearColor     = vk::ClearColorValue(0.0f, 0.0f, 0.0f, 1.0f);
+		vk::RenderingAttachmentInfo attachmentInfo = {
+		    .imageView   = swapChainImageViews[imageIndex],
+		    .imageLayout = vk::ImageLayout::eColorAttachmentOptimal,
+		    .loadOp      = vk::AttachmentLoadOp::eClear,
+		    .storeOp     = vk::AttachmentStoreOp::eStore,
+		    .clearValue  = clearColor};
+
+		vk::RenderingInfo renderingInfo = {
+		    .renderArea           = {.offset = {0, 0}, .extent = swapChainExtent},
+		    .layerCount           = 1,
+		    .colorAttachmentCount = 1,
+		    .pColorAttachments    = &attachmentInfo
+		};
+
+		commandBuffer.beginRendering(renderingInfo);
+
+		commandBuffer.bindPipeline(vk::PipelineBindPoint::eGraphics, *graphicsPipeline);
+		// here we define the viewport and scissor rectange, which we earlier defined as dynamic states in the graphics
+		// pipeline. This allows us to change the viewport and scissor rectangle at draw time, rather than having to
+		// create a new graphics pipeline for each different viewport and scissor rectangle.
+		commandBuffer.setViewport(
+		    0,
+		    vk::Viewport(
+		        0.0f,
+		        0.0f,
+		        static_cast<float>(swapChainExtent.width),
+		        static_cast<float>(swapChainExtent.height),
+		        0.0f,
+		        1.0f));
+		commandBuffer.setScissor(0, vk::Rect2D(vk::Offset2D(0, 0), swapChainExtent));
+
+		commandBuffer.draw(3, 1, 0, 0);        // vertexCount, instanceCount, firstVertex, firstInstance
+
+		commandBuffer.endRendering();
+
+		// transition the swapchain image to vk::ImageLayout::ePresentSrcKHR so that it can be presented to the screen
+		transition_image_layout(
+			imageIndex,
+			vk::ImageLayout::eColorAttachmentOptimal,
+			vk::ImageLayout::ePresentSrcKHR,
+			vk::AccessFlagBits2::eColorAttachmentWrite,        // srcAccessMask
+			{},                                                // dstAccessMask (no need to wait for subsequent operations)
+			vk::PipelineStageFlagBits2::eColorAttachmentOutput,        // srcStage
+			vk::PipelineStageFlagBits2::eBottomOfPipe                // dstStage
+		);
+
+		commandBuffer.end();
+	}
+
+	// images can be in different layouts that are optimized for different operations. 
+	// For example, an image can be in a layout that is optimal for presenting to the screen, 
+	// or in a layout that is optimal for being used as a color attachment
+	void transition_image_layout(
+	    uint32_t                imageIndex,
+	    vk::ImageLayout         old_layout,
+	    vk::ImageLayout         new_layout,
+	    vk::AccessFlags2        src_access_mask,
+	    vk::AccessFlags2        dst_access_mask,
+	    vk::PipelineStageFlags2 src_stage_mask,
+	    vk::PipelineStageFlags2 dst_stage_mask)
+	{
+		vk::ImageMemoryBarrier2 barrier = {
+		    .srcStageMask        = src_stage_mask,
+		    .srcAccessMask       = src_access_mask,
+		    .dstStageMask        = dst_stage_mask,
+		    .dstAccessMask       = dst_access_mask,
+		    .oldLayout           = old_layout,
+		    .newLayout           = new_layout,
+		    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+		    .image               = swapChainImages[imageIndex],
+		    .subresourceRange    = {
+		           .aspectMask     = vk::ImageAspectFlagBits::eColor,
+		           .baseMipLevel   = 0,
+		           .levelCount     = 1,
+		           .baseArrayLayer = 0,
+		           .layerCount     = 1}};
+		vk::DependencyInfo dependency_info = {
+		    .dependencyFlags = {}, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &barrier};
+		commandBuffer.pipelineBarrier2(dependency_info);
+	}
+
+
+	// note: vulkan does not automatically figure out when GPU operations must wait for one another
+	// you must explicitly define the dependencies between operations (ex: B must wait for A), which is done using semaphores and fences.
+	// here, we must order 
+	// 1) Acquire an image from the swap chain
+	// 2) Execute commands that draw onto the acquired image
+	// 3) Present that image to the screen for presentation, returning it to the swapchain
+
+	// SEMAPHORE: used to add order between queue operations, used to synchronize operations between GPU-GPU
+	// ex: (binary semaphore) When operation A finishes, semaphore S will be signaled, while operation B wont start until S is signaled. 
+	// After operation B begins executing, semaphore S is automatically reset back to being unsignaled, allowing it to be used again. 
+	// note: semaphores are not used to synchronize operations between the CPU
+	// and GPU, only between GPU operations. it doesn't block host execution, and the CPU can continue executing without
+	// waiting for the semaphore to be signaled.
+
+	// FENCE: a fence coordinates GPU work with the CPU.
+	// A concrete example is taking a screenshot. Say we have already done the necessary work on the GPU. 
+	// Now need to transfer the image from the GPU over to the host and then save the memory to a file. 
+	// We have command buffer A which executes the transfer and fence F. We submit command buffer A with fence F, then immediately tell 
+	// the host to wait for F to signal. This causes the host to block until command buffer A finishes execution. 
+	// Thus, we are safe to let the host save the file to disk, as the memory transfer has completed.
+	
+	// use semaphores to drive the swapchain image acquisition and presentation (acquire an image, then draw to it, then present it)
+	// and use fences for the CPU to wait for frames to finish before starting a new one.
+
+	void createSyncObjects()
+	{
+		presentCompleteSemaphore = vk::raii::Semaphore(device, vk::SemaphoreCreateInfo());
+		renderFinishedSemaphore  = vk::raii::Semaphore(device, vk::SemaphoreCreateInfo());
+		drawFence                = vk::raii::Fence(device, {.flags = vk::FenceCreateFlagBits::eSignaled});
+	}
+
+	void drawFrame()
+	{
+		// wait for the previous frame to finish before starting a new one. this is done by waiting for the drawFence to
+		// be signaled, which indicates that the previous frame has finished executing on the GPU.
+		auto fenceResult = device.waitForFences(*drawFence, vk::True, UINT64_MAX);
+		if (fenceResult != vk::Result::eSuccess)
+		{
+			throw std::runtime_error("failed to wait for fence!");
+		}
+		// This resets drawFence to unsignaled so the next submission can signal it again
+		device.resetFences(*drawFence);
+
+		// acquire an image from the swap chain, and get the index of the image that was acquired. use the
+		// presentCompleteSemaphore to ensure we only get swapchain image that our application can render into
+		// CPU will wait indefinitely (UINT64_MAX) for an image to become available, and we signal the
+		// presentCompleteSemaphore when the image is ready
+		auto [result, imageIndex] = swapChain.acquireNextImage(UINT64_MAX, *presentCompleteSemaphore, nullptr);
+
+		recordCommandBuffer(imageIndex);        // record the command buffer to draw the triangle onto the acquired swapchain image
+
+		// submit work to the GPU. GPU will know it cannot reach color-output operations
+		// until presentCompleteSemaphore is signaled
+		// it submits the command buffer, and will signal the renderFinishedSemaphore when the command buffer has
+		// finished executing, which will be used to signal that the image is ready for presentation
+		// (so wait until presentCompleteSemaphore before executing the command buffer, and signal
+		// renderFinishedSemaphore when the command buffer has finished executing)
+		vk::PipelineStageFlags waitDestinationStageMask(vk::PipelineStageFlagBits::eColorAttachmentOutput);
+		const vk::SubmitInfo   submitInfo{
+		      .waitSemaphoreCount   = 1,
+		      .pWaitSemaphores      = &*presentCompleteSemaphore,
+		      .pWaitDstStageMask    = &waitDestinationStageMask,
+		      .commandBufferCount   = 1,
+		      .pCommandBuffers      = &*commandBuffer,
+		      .signalSemaphoreCount = 1,
+		      .pSignalSemaphores    = &*renderFinishedSemaphore};        // signal the renderFinishedSemaphore when the
+		                                                              // command buffer has finished executing
+
+		// submit the command buffer to the graphics queue, and when that is done, signal drawFence to indicate that the
+		// frame has finished executing on the GPU
+		graphicsQueue.submit(submitInfo, *drawFence);
+
+		// tell GPU to present the image to the screen, waiting on renderFinishedSemaphore before presenting the image.
+		const vk::PresentInfoKHR presentInfoKHR{
+		    .waitSemaphoreCount = 1,
+		    .pWaitSemaphores    = &*renderFinishedSemaphore,
+		    .swapchainCount     = 1,
+		    .pSwapchains        = &*swapChain,
+		    .pImageIndices      = &imageIndex};
+
+		result = graphicsQueue.presentKHR(presentInfoKHR);
+	}
+
+
 
 	static std::vector<char> readFile(const std::string &filename)
 	{
